@@ -4,6 +4,7 @@ import axios from 'axios';
 import pino from 'pino';
 import { parse, stringify } from 'querystring';
 import { CookieAttributes, Cookies, SameSite, SAME_SITE_VALUES } from './util/cookie';
+import { generateCSRFData } from './util/security';
 
 interface AuthenticatorParams {
   region: string;
@@ -266,12 +267,23 @@ export class Authenticator {
    * @return {CloudFrontRequestResult} Redirect response.
    */
   _getRedirectToCognitoUserPoolResponse(request: CloudFrontRequest, redirectURI: string): CloudFrontRequestResult {
-    let redirectPath = request.uri;
-    if (request.querystring && request.querystring !== '') {
-      redirectPath += encodeURIComponent('?' + request.querystring);
-    }
-    const userPoolUrl = `https://${this._userPoolDomain}/authorize?redirect_uri=${redirectURI}&response_type=code&client_id=${this._userPoolAppId}&state=${redirectPath}`;
+    const csrfData = generateCSRFData(redirectURI);
+
+    const userPoolUrl = `https://${this._userPoolDomain}/authorize?redirect_uri=${redirectURI}&response_type=code&client_id=${this._userPoolAppId}&state=${csrfData.state}`;
     this._logger.debug(`Redirecting user to Cognito User Pool URL ${userPoolUrl}`);
+
+    const cookieAttributes: CookieAttributes = {
+      expires: new Date(Date.now() + this._cookieExpirationDays * 864e+5),
+      secure: true,
+      httpOnly: true,
+      sameSite: 'Strict',
+    };
+    const cookies = [
+      Cookies.serialize('sbxb-ag-pkce', csrfData.pkce, cookieAttributes),
+      Cookies.serialize('sbxb-ag-nonce', csrfData.nonce, cookieAttributes),
+      Cookies.serialize('sbxb-ag-nonce-hmac', csrfData.nonceHmac, cookieAttributes),
+    ];
+
     return {
       status: '302',
       headers: {
@@ -287,9 +299,11 @@ export class Authenticator {
           key: 'Pragma',
           value: 'no-cache',
         }],
+        'set-cookie': cookies.map(c => ({ key: 'Set-Cookie', value: c })),
       },
     };
   }
+
   /**
    * Handle Lambda@Edge event:
    *   * if authentication cookie is present and valid: forward the request
@@ -331,6 +345,22 @@ export class Authenticator {
       } else {
         return this._getRedirectToCognitoUserPoolResponse(request, redirectURI);
       }
+    }
+  }
+
+  async handleSignIn(event: CloudFrontRequestEvent): Promise<CloudFrontRequestResult> {
+    this._logger.debug({ msg: 'Handling Lambda@Edge event', event });
+
+    const { request } = event.Records[0].cf;
+    const requestParams = parse(request.querystring);
+    const redirectURI = requestParams.redirect_uri as string;
+
+    try {
+      const tokens = this._getTokensFromCookie(request.headers.cookie);
+      this._logger.debug({ msg: 'Verifying token...', tokens });
+    } catch (err) {
+      this._logger.debug("User isn't authenticated: %s", err);
+      return this._getRedirectToCognitoUserPoolResponse(request, redirectURI);
     }
   }
 }
