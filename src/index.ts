@@ -267,9 +267,12 @@ export class Authenticator {
    * @return {CloudFrontRequestResult} Redirect response.
    */
   _getRedirectToCognitoUserPoolResponse(request: CloudFrontRequest, redirectURI: string): CloudFrontRequestResult {
+    const cfDomain = request.headers.host[0].value;
+    const oauthRedirectURI = `https://${cfDomain}/parseAuth`;
+
     const csrfData = generateCSRFData(redirectURI);
 
-    const userPoolUrl = `https://${this._userPoolDomain}/authorize?redirect_uri=${redirectURI}&response_type=code&client_id=${this._userPoolAppId}&state=${csrfData.state}`;
+    const userPoolUrl = `https://${this._userPoolDomain}/authorize?redirect_uri=${oauthRedirectURI}&response_type=code&client_id=${this._userPoolAppId}&state=${csrfData.state}`;
     this._logger.debug(`Redirecting user to Cognito User Pool URL ${userPoolUrl}`);
 
     const cookieAttributes: CookieAttributes = {
