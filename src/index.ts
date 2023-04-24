@@ -278,8 +278,9 @@ export class Authenticator {
     const cookieAttributes: CookieAttributes = {
       expires: new Date(Date.now() + this._cookieExpirationDays * 864e+5),
       secure: true,
-      httpOnly: true,
+      httpOnly: this._httpOnly,
       sameSite: 'Strict',
+      path: this._cookiePath,
     };
     const cookies = [
       Cookies.serialize('sbxb-ag-pkce', csrfData.pkce, cookieAttributes),
