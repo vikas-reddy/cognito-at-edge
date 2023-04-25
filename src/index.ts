@@ -276,7 +276,8 @@ export class Authenticator {
     this._logger.debug(`Redirecting user to Cognito User Pool URL ${userPoolUrl}`);
 
     const cookieAttributes: CookieAttributes = {
-      expires: new Date(Date.now() + this._cookieExpirationDays * 864e+5),
+      // Expire CSRF cookies in 10 mins
+      expires: new Date(Date.now() + 10*60*1000),
       secure: true,
       httpOnly: this._httpOnly,
       sameSite: 'Strict',

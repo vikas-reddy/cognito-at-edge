@@ -22,7 +22,7 @@ export function generateNonce() {
 
 export function generateCSRFData(redirectURI: string) {
   const nonce = generateNonce();
-  const nonceHmac = sign(nonce, CONFIG.nonceSigningSecret, CONFIG.nonceLength);
+  const nonceHmac = signedNonceHmac(nonce);
 
   const state = urlSafe.stringify(
     Buffer.from(
@@ -51,17 +51,17 @@ export function generateSecret(allowedCharacters: string, secretLength: number) 
     .join('');
 }
 
-export function sign(
-  stringToSign,
-  secret,
-  signatureLength,
-) {
+export function sign(stringToSign: string, secret: string, signatureLength: number) {
   const digest = createHmac('sha256', secret)
     .update(stringToSign)
     .digest('base64')
     .slice(0, signatureLength);
   const signature = urlSafe.stringify(digest);
   return signature;
+}
+
+export function signedNonceHmac(nonce: string): string {
+  return sign(nonce, CONFIG.nonceSigningSecret, CONFIG.nonceLength);
 }
 
 export const urlSafe = {
