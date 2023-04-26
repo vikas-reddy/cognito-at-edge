@@ -4,7 +4,7 @@ import axios from 'axios';
 import pino from 'pino';
 import { parse, stringify } from 'querystring';
 import { CookieAttributes, Cookies, SameSite, SAME_SITE_VALUES } from './util/cookie';
-import { generateCSRFData, signedNonceHmac, urlSafe } from './util/security';
+import { generateCSRFTokens, signedNonceHmac, urlSafe } from './util/security';
 
 interface AuthenticatorParams {
   region: string;
@@ -26,6 +26,14 @@ interface Tokens {
   accessToken?: string;
   idToken?: string;
   refreshToken?: string;
+}
+
+interface CSRFTokens {
+  nonce?: string;
+  nonceHmac?: string;
+  pkce?: string;
+  pkceHash?: string;
+  state?: string;
 }
 
 export class Authenticator {
@@ -186,9 +194,7 @@ export class Authenticator {
       Buffer.from(urlSafe.parse(requestParams.state), 'base64').toString()
     );
 
-    const originalNonce = requestCookies.find(({name}) => name === 'sbxb-ag-nonce')?.value;
-    const nonceHmac = requestCookies.find(({name}) => name === 'sbxb-ag-nonce-hmac')?.value;
-    const pkce = requestCookies.find(({name}) => name === 'sbxb-ag-pkce')?.value;
+    const {nonce: originalNonce, nonceHmac, pkce} = this._getCSRFTokensFromCookie(request.headers.cookie);
 
     if (
       !parsedState.nonce ||
@@ -235,16 +241,16 @@ export class Authenticator {
       path: this._cookiePath,
     };
     const responseCookies = [
-      // Make accessToken js-accessible
       Cookies.serialize(`${usernameBase}.accessToken`, tokens.accessToken, {...cookieAttributes, httpOnly: false}),
       Cookies.serialize(`${usernameBase}.idToken`, tokens.idToken, {...cookieAttributes, httpOnly: false}),
       ...(tokens.refreshToken ? [Cookies.serialize(`${usernameBase}.refreshToken`, tokens.refreshToken, cookieAttributes)] : []),
       Cookies.serialize(`${usernameBase}.tokenScopesString`, 'phone email profile openid aws.cognito.signin.user.admin', cookieAttributes),
       Cookies.serialize(`${this._cookieBase}.LastAuthUser`, username, cookieAttributes),
 
-      Cookies.serialize('sbxb-ag-pkce', '', {...cookieAttributes, ...{domain: undefined, expires: new Date()}}),
-      Cookies.serialize('sbxb-ag-nonce', '', {...cookieAttributes, ...{domain: undefined, expires: new Date()}}),
-      Cookies.serialize('sbxb-ag-nonce-hmac', '', {...cookieAttributes, ...{domain: undefined, expires: new Date()}}),
+      // Clear CSRF Token Cookies
+      Cookies.serialize(`${this._cookieBase}.pkce`, '', {...cookieAttributes, domain: undefined, expires: new Date()}),
+      Cookies.serialize(`${this._cookieBase}.nonce`, '', {...cookieAttributes, domain: undefined, expires: new Date()}),
+      Cookies.serialize(`${this._cookieBase}.nonceHmac`, '', {...cookieAttributes, domain: undefined, expires: new Date()}),
     ];
 
     const response: CloudFrontRequestResult = {
@@ -310,6 +316,44 @@ export class Authenticator {
   }
 
   /**
+   * Extract values of the CSRF tokens from the request cookies.
+   * @param  {Array}  cookieHeaders 'Cookie' request headers.
+   * @return {CSRFTokens} Extracted CSRF Tokens from cookie.
+   */
+  _getCSRFTokensFromCookie(cookieHeaders: Array<{ key?: string | undefined, value: string }> | undefined): CSRFTokens {
+    if (!cookieHeaders) {
+      this._logger.debug("Cookies weren't present in the request");
+      throw new Error("Cookies weren't present in the request");
+    }
+
+    this._logger.debug({ msg: 'Extracting CSRF tokens from request cookie', cookieHeaders });
+
+    const cookies = cookieHeaders.flatMap(h => Cookies.parse(h.value));
+
+    const nonceCookieNamePostfix = '.nonce';
+    const nonceHmacCookieNamePostfix = '.nonceHmac';
+    const pkceCookieNamePostfix = '.pkce';
+
+    const csrfTokens: CSRFTokens = {};
+    for (const {name, value} of cookies){
+      if (name.startsWith(this._cookieBase)) {
+        if (name.endsWith(nonceCookieNamePostfix)) {
+          csrfTokens.nonce = value;
+        }
+        if (name.endsWith(nonceHmacCookieNamePostfix)) {
+          csrfTokens.nonceHmac = value;
+        }
+        if (name.endsWith(pkceCookieNamePostfix)) {
+          csrfTokens.pkce = value;
+        }
+      }
+    }
+
+    this._logger.debug({ msg: 'Found CSRF tokens in cookie', csrfTokens });
+    return csrfTokens;
+  }
+
+  /**
    * Get redirect to cognito userpool response
    * @param  {CloudFrontRequest}  request The original request
    * @param  {string}  redirectURI Redirection URI.
@@ -319,9 +363,9 @@ export class Authenticator {
     const cfDomain = request.headers.host[0].value;
     const oAuthRedirectURI = this._parseAuthPath ? `https://${cfDomain}/${this._parseAuthPath}` : redirectURI;
 
-    const csrfData = generateCSRFData(redirectURI);
+    const csrfTokens: CSRFTokens = generateCSRFTokens(redirectURI);
 
-    const userPoolUrl = `https://${this._userPoolDomain}/authorize?redirect_uri=${oAuthRedirectURI}&response_type=code&client_id=${this._userPoolAppId}&state=${csrfData.state}&scope=openid`;
+    const userPoolUrl = `https://${this._userPoolDomain}/authorize?redirect_uri=${oAuthRedirectURI}&response_type=code&client_id=${this._userPoolAppId}&state=${csrfTokens.state}&scope=openid`;
     this._logger.debug(`Redirecting user to Cognito User Pool URL ${userPoolUrl}`);
 
     const cookieAttributes: CookieAttributes = {
@@ -333,9 +377,9 @@ export class Authenticator {
       path: this._cookiePath,
     };
     const cookies = [
-      Cookies.serialize('sbxb-ag-pkce', csrfData.pkce, cookieAttributes),
-      Cookies.serialize('sbxb-ag-nonce', csrfData.nonce, cookieAttributes),
-      Cookies.serialize('sbxb-ag-nonce-hmac', csrfData.nonceHmac, cookieAttributes),
+      Cookies.serialize(`${this._cookieBase}.pkce`, csrfTokens.pkce, cookieAttributes),
+      Cookies.serialize(`${this._cookieBase}.nonce`, csrfTokens.nonce, cookieAttributes),
+      Cookies.serialize(`${this._cookieBase}.nonceHmac`, csrfTokens.nonceHmac, cookieAttributes),
     ];
 
     return {

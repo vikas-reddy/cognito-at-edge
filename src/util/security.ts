@@ -20,7 +20,7 @@ export function generateNonce() {
   return nonce;
 }
 
-export function generateCSRFData(redirectURI: string) {
+export function generateCSRFTokens(redirectURI: string) {
   const nonce = generateNonce();
   const nonceHmac = signedNonceHmac(nonce);
 
