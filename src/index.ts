@@ -350,6 +350,81 @@ export class Authenticator {
     return csrfTokens;
   }
 
+  async _revokeTokens(tokens: Tokens) {
+    const authorization = this._userPoolAppSecret && Buffer.from(`${this._userPoolAppId}:${this._userPoolAppSecret}`).toString('base64');
+    const revokeRequest = {
+      url: `https://${this._userPoolDomain}/oauth2/revoke`,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        ...(authorization && {'Authorization': `Basic ${authorization}`}),
+      },
+      data: stringify({
+        client_id: this._userPoolAppId,
+        token: tokens.refreshToken,
+      }),
+    } as const;
+    this._logger.debug({ msg: 'Revoking token...', request: revokeRequest, token: tokens.refreshToken });
+    return axios.request(revokeRequest)
+      .then(() => {
+        this._logger.debug({ msg: 'Revoked token', token: tokens.refreshToken });
+      })
+      .catch(err => {
+        this._logger.error({ msg: 'Unable to revoke refreshToken', request: revokeRequest, err: JSON.stringify(err) });
+        throw err;
+      });
+  }
+
+  async _clearCookies(event: CloudFrontRequestEvent, tokens: Tokens) {
+    const { request } = event.Records[0].cf;
+    const cfDomain = request.headers.host[0].value;
+    const requestParams = parse(request.querystring);
+    const redirectURI = requestParams.redirect_uri as string;
+
+    const decoded = await this._jwtVerifier.verify(tokens.idToken);
+    const username = decoded['cognito:username'] as string;
+    const usernameBase = `${this._cookieBase}.${username}`;
+    const cookieDomain = this._disableCookieDomain ? undefined : (this._cookieDomain ? this._cookieDomain : cfDomain);
+    const cookieAttributes: CookieAttributes = {
+      domain: cookieDomain,
+      expires: new Date(),
+      secure: true,
+      httpOnly: this._httpOnly,
+      sameSite: this._sameSite,
+      path: this._cookiePath,
+    };
+    const responseCookies = [
+      Cookies.serialize(`${usernameBase}.accessToken`, '', cookieAttributes),
+      Cookies.serialize(`${usernameBase}.idToken`, '', cookieAttributes),
+      ...(tokens.refreshToken ? [Cookies.serialize(`${usernameBase}.refreshToken`, '', cookieAttributes)] : []),
+      Cookies.serialize(`${usernameBase}.tokenScopesString`, '', cookieAttributes),
+      Cookies.serialize(`${this._cookieBase}.LastAuthUser`, '', cookieAttributes),
+    ];
+
+    const response: CloudFrontRequestResult = {
+      status: '302' ,
+      headers: {
+        'location': [{
+          key: 'Location',
+          value: redirectURI,
+        }],
+        'cache-control': [{
+          key: 'Cache-Control',
+          value: 'no-cache, no-store, max-age=0, must-revalidate',
+        }],
+        'pragma': [{
+          key: 'Pragma',
+          value: 'no-cache',
+        }],
+        'set-cookie': responseCookies.map(c => ({ key: 'Set-Cookie', value: c })),
+      },
+    };
+
+    this._logger.debug({ msg: 'Generated set-cookie response', response });
+
+    return response;
+  }
+
   /**
    * Get redirect to cognito userpool response
    * @param  {CloudFrontRequest}  request The original request
@@ -573,81 +648,6 @@ export class Authenticator {
         },
       };
     }
-  }
-
-  async _revokeTokens(tokens: Tokens) {
-    const authorization = this._userPoolAppSecret && Buffer.from(`${this._userPoolAppId}:${this._userPoolAppSecret}`).toString('base64');
-    const revokeRequest = {
-      url: `https://${this._userPoolDomain}/oauth2/revoke`,
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        ...(authorization && {'Authorization': `Basic ${authorization}`}),
-      },
-      data: stringify({
-        client_id: this._userPoolAppId,
-        token: tokens.refreshToken,
-      }),
-    } as const;
-    this._logger.debug({ msg: 'Revoking token...', request: revokeRequest, token: tokens.refreshToken });
-    return axios.request(revokeRequest)
-      .then(() => {
-        this._logger.debug({ msg: 'Revoked token', token: tokens.refreshToken });
-      })
-      .catch(err => {
-        this._logger.error({ msg: 'Unable to revoke refreshToken', request: revokeRequest, err: JSON.stringify(err) });
-        throw err;
-      });
-  }
-
-  async _clearCookies(event: CloudFrontRequestEvent, tokens: Tokens) {
-    const { request } = event.Records[0].cf;
-    const cfDomain = request.headers.host[0].value;
-    const requestParams = parse(request.querystring);
-    const redirectURI = requestParams.redirect_uri as string;
-
-    const decoded = await this._jwtVerifier.verify(tokens.idToken);
-    const username = decoded['cognito:username'] as string;
-    const usernameBase = `${this._cookieBase}.${username}`;
-    const cookieDomain = this._disableCookieDomain ? undefined : (this._cookieDomain ? this._cookieDomain : cfDomain);
-    const cookieAttributes: CookieAttributes = {
-      domain: cookieDomain,
-      expires: new Date(),
-      secure: true,
-      httpOnly: this._httpOnly,
-      sameSite: this._sameSite,
-      path: this._cookiePath,
-    };
-    const responseCookies = [
-      Cookies.serialize(`${usernameBase}.accessToken`, '', cookieAttributes),
-      Cookies.serialize(`${usernameBase}.idToken`, '', cookieAttributes),
-      ...(tokens.refreshToken ? [Cookies.serialize(`${usernameBase}.refreshToken`, '', cookieAttributes)] : []),
-      Cookies.serialize(`${usernameBase}.tokenScopesString`, '', cookieAttributes),
-      Cookies.serialize(`${this._cookieBase}.LastAuthUser`, '', cookieAttributes),
-    ];
-
-    const response: CloudFrontRequestResult = {
-      status: '302' ,
-      headers: {
-        'location': [{
-          key: 'Location',
-          value: redirectURI,
-        }],
-        'cache-control': [{
-          key: 'Cache-Control',
-          value: 'no-cache, no-store, max-age=0, must-revalidate',
-        }],
-        'pragma': [{
-          key: 'Pragma',
-          value: 'no-cache',
-        }],
-        'set-cookie': responseCookies.map(c => ({ key: 'Set-Cookie', value: c })),
-      },
-    };
-
-    this._logger.debug({ msg: 'Generated set-cookie response', response });
-
-    return response;
   }
 }
 
