@@ -205,7 +205,6 @@ export class Authenticator {
         throw new Error('Your browser didn\'t send the nonce cookie along, but it is required for security (prevent CSRF).');
       }
       throw new Error('Nonce mismatch. This can happen if you start multiple authentication attempts in parallel (e.g. in separate tabs)');
-      
     }
     if (!pkce) {
       throw new Error('Your browser didn\'t send the pkce cookie along, but it is required for security (prevent CSRF).');
@@ -222,16 +221,14 @@ export class Authenticator {
    * Create a Lambda@Edge redirection response to set the tokens on the user's browser cookies.
    * @param  {Object} tokens   Cognito User Pool tokens.
    * @param  {String} domain   Website domain.
+   * @param  {String} location Path to redirection.
    * @return Lambda@Edge response.
    */
-  async _getRedirectResponse(event: CloudFrontRequestEvent, tokens: Tokens, location: string): Promise<CloudFrontRequestResult> {
-    const { request } = event.Records[0].cf;
-    const cfDomain = request.headers.host[0].value;
-
+  async _getRedirectResponse(tokens: Tokens, domain: string, location: string): Promise<CloudFrontRequestResult> {
     const decoded = await this._jwtVerifier.verify(tokens.idToken);
     const username = decoded['cognito:username'] as string;
     const usernameBase = `${this._cookieBase}.${username}`;
-    const cookieDomain = this._disableCookieDomain ? undefined : (this._cookieDomain ? this._cookieDomain : cfDomain);
+    const cookieDomain = this._disableCookieDomain ? undefined : (this._cookieDomain ? this._cookieDomain : domain);
     const cookieAttributes: CookieAttributes = {
       domain: cookieDomain,
       expires: new Date(Date.now() + this._cookieExpirationDays * 864e+5),
@@ -240,7 +237,7 @@ export class Authenticator {
       sameSite: this._sameSite,
       path: this._cookiePath,
     };
-    const responseCookies = [
+    const cookies = [
       Cookies.serialize(`${usernameBase}.accessToken`, tokens.accessToken, {...cookieAttributes, httpOnly: false}),
       Cookies.serialize(`${usernameBase}.idToken`, tokens.idToken, {...cookieAttributes, httpOnly: false}),
       ...(tokens.refreshToken ? [Cookies.serialize(`${usernameBase}.refreshToken`, tokens.refreshToken, cookieAttributes)] : []),
@@ -268,7 +265,7 @@ export class Authenticator {
           key: 'Pragma',
           value: 'no-cache',
         }],
-        'set-cookie': responseCookies.map(c => ({ key: 'Set-Cookie', value: c })),
+        'set-cookie': cookies.map(c => ({ key: 'Set-Cookie', value: c })),
       },
     };
 
@@ -430,7 +427,7 @@ export class Authenticator {
         if (tokens.refreshToken) {
           this._logger.debug({ msg: 'Verifying idToken failed, verifying refresh token instead...', tokens, err });
           return await this._fetchTokensFromRefreshToken(redirectURI, tokens.refreshToken)
-            .then(tokens => this._getRedirectResponse(event, tokens, request.uri));
+            .then(tokens => this._getRedirectResponse(tokens, cfDomain, request.uri));
         } else {
           throw err;
         }
@@ -439,7 +436,7 @@ export class Authenticator {
       this._logger.debug("User isn't authenticated: %s", err);
       if (requestParams.code) {
         return this._fetchTokensFromCode(redirectURI, requestParams.code)
-          .then(tokens => this._getRedirectResponse(event, tokens, requestParams.state as string));
+          .then(tokens => this._getRedirectResponse(tokens, cfDomain, requestParams.state as string));
       } else {
         return this._getRedirectToCognitoUserPoolResponse(request, redirectURI);
       }
@@ -501,7 +498,7 @@ export class Authenticator {
         );
         this._logger.debug({msg: 'Parsed state param...', parsedState});
 
-        return this._getRedirectResponse(event, tokens, parsedState.redirect_uri);
+        return this._getRedirectResponse(tokens, cfDomain, parsedState.redirect_uri);
       } else {
         this._logger.debug({msg: 'Code param not found', requestParams});
         throw new Error('OAuth code parameter not found');
@@ -519,6 +516,7 @@ export class Authenticator {
     this._logger.debug({ msg: 'Handling Lambda@Edge event', event });
 
     const { request } = event.Records[0].cf;
+    const cfDomain = request.headers.host[0].value;
     const redirectURI = `https://${this._cookieDomain}`;
 
     try {
@@ -531,7 +529,7 @@ export class Authenticator {
       tokens = await this._fetchTokensFromRefreshToken(redirectURI, tokens.refreshToken);
 
       this._logger.debug({ msg: 'Refreshed tokens...', tokens, user });
-      return this._getRedirectResponse(event, tokens, redirectURI);
+      return this._getRedirectResponse(tokens, cfDomain, redirectURI);
     } catch (err) {
       this._logger.debug("User isn't authenticated: %s", err);
       return this._getRedirectToCognitoUserPoolResponse(request, redirectURI);
